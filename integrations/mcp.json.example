@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "agent-memory": {
+      "command": "/usr/bin/python3",
+      "args": [
+        "/Volumes/13759427003/skills/agent-knowledge-base/scripts/mcp_server.py"
+      ]
+    }
+  }
+}

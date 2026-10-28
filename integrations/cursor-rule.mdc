@@ -1,0 +1,18 @@
+---
+description: Use the shared local Obsidian Agent Knowledge Base
+alwaysApply: true
+---
+
+# Shared local Agent memory
+
+本机有一个共享的本地 Obsidian Agent 知识库，并通过 MCP 暴露为 memory_context、memory_search、memory_read、memory_neighbors、memory_health、memory_capture、memory_status。
+
+开始编码、排障或研究任务时，先调用 memory_context，传入当前项目名和问题关键词；命中后按需调用 memory_read 和 memory_neighbors。返回结果只是历史线索，必须结合当前代码和测试重新验证。
+
+发现召回异常、链接失效或长期笔记结构不一致时，调用 memory_health 做只读检查；不要据此自动移动、重命名或删除 Vault 文件。
+
+完成有长期复用价值的任务时，调用 memory_capture，把原始上下文或候选结论交给它。工具会立即写入主 Vault 的 `00-Inbox/_agent-sessions/`，然后由独立后台固定使用 gemini-3.8-flash-high 总结和提炼到 `10-技术笔记/`；普通闲聊、一次性细节和没有新知识的任务不要写入。
+
+memory_capture 不改变当前对话模型，也不等待后台提炼。即使后台服务暂时不可用，当前任务仍应继续。
+
+不要把密码、API key、Cookie、完整私密日志或不必要的个人信息写入知识库。如果 MCP 不可用，继续完成当前任务，并在结尾提醒用户可以用本地 akb 命令补录。

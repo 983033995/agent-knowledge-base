@@ -1,0 +1,42 @@
+{
+  "vault_path": ".akb-vault",
+  "auto_discover_obsidian": false,
+  "session_directory": "00-Inbox/_agent-sessions",
+  "knowledge_directory": "10-技术笔记",
+  "patterns_directory": "10-技术笔记/patterns",
+  "decisions_directory": "10-技术笔记",
+  "search_directories": [
+    "00-知识库",
+    "00-Inbox",
+    "10-技术笔记",
+    "20-AI资源",
+    "20-工作记录"
+  ],
+  "managed_directories": [
+    "00-Inbox/_agent-sessions",
+    "10-技术笔记",
+    "10-技术笔记/patterns",
+    "99-归档"
+  ],
+  "search_all_markdown": true,
+  "search_exclude_directories": [
+    ".git",
+    ".obsidian",
+    ".claude",
+    ".workbuddy",
+    "附件",
+    "30-个人管理",
+    "30-声音库",
+    "40-日记",
+    "50-小说创作",
+    "90-模板",
+    "99-归档"
+  ],
+  "default_wikilinks": [
+    "[[AI与Agent MOC]]",
+    "[[🏠-主页]]"
+  ],
+  "max_context_chars": 12000,
+  "session_excerpt_chars": 18000,
+  "search_limit": 8
+}

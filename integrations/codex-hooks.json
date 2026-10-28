@@ -1,0 +1,62 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/homebrew/bin/headroom init hook ensure --profile init-user --marker headroom-init-codex",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"/Volumes/13759427003/skills/agent-knowledge-base/scripts/lifecycle_hook.py\" codex start",
+            "timeout": 10,
+            "additionalContextLimit": 5000
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/homebrew/bin/headroom init hook ensure --profile init-user --marker headroom-init-codex",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"/Volumes/13759427003/skills/agent-knowledge-base/scripts/lifecycle_hook.py\" codex stop",
+            "timeout": 10,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"/Volumes/13759427003/skills/agent-knowledge-base/scripts/lifecycle_hook.py\" codex end",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

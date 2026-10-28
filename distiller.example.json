@@ -1,0 +1,11 @@
+{
+  "enabled": false,
+  "endpoint": "http://127.0.0.1:8317/v1/chat/completions",
+  "model": "gemini-3.8-flash-high",
+  "auth_command": "",
+  "settle_seconds": 8,
+  "timeout_seconds": 90,
+  "max_input_chars": 22000,
+  "max_output_tokens": 1800,
+  "state_dir": ".distiller"
+}
