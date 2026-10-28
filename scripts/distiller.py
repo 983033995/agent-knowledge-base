@@ -614,6 +614,33 @@ def enqueue(note_path: str | Path) -> dict[str, Any]:
         with note_lock(note):
             metadata, body, version_hash, context_hash = _note_input(note)
             existing = _get_job(settings, "queue", job_key)
+            failed_recovery = _get_job(
+                settings,
+                "failed",
+                _failed_key(note, version_hash, context_hash),
+            )
+            if (
+                failed_recovery
+                and failed_recovery.get("failure_kind") == "publication_recovery"
+                and _entry_matches_input(failed_recovery, version_hash, context_hash)
+                and not (existing and _entry_matches_input(existing, version_hash, context_hash))
+            ):
+                # A terminal publication conflict requires an explicit retry.  A
+                # stale queue row for another body must not silently reset its
+                # bounded recovery counter when a worker later observes this input.
+                if existing:
+                    _delete_job(settings, "queue", job_key)
+                log_line(
+                    settings,
+                    f"发布恢复已进入失败账本，等待显式重试：{note.name}",
+                )
+                return {
+                    "queued": False,
+                    "worker_started": False,
+                    "model": FIXED_MODEL,
+                    "reason": "publication_recovery_failed",
+                    "path": str(note),
+                }
             publication = metadata.get("distillation_publication")
             pending_current = isinstance(publication, dict) and publication.get("source_input_hash") == version_hash and publication.get("source_context_hash") == context_hash
             if _has_success_for(metadata, version_hash, context_hash) or pending_current:
@@ -910,49 +937,71 @@ def request_model(
 
 def parse_distillation_json(text: str) -> dict[str, Any]:
     candidate = text.strip()
-    fenced = re.search(
+    fenced = re.fullmatch(
         r"\x60\x60\x60(?:json)?\s*(\{.*\})\s*\x60\x60\x60",
         candidate,
         re.DOTALL | re.IGNORECASE,
     )
     if fenced:
         candidate = fenced.group(1).strip()
-    else:
-        start = candidate.find("{")
-        end = candidate.rfind("}")
-        if start >= 0 and end > start:
-            candidate = candidate[start : end + 1]
+
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError("duplicate key")
+            result[key] = item
+        return result
+
+    def reject_non_finite(value: str) -> None:
+        raise ValueError("non-finite number")
+
     try:
-        value = json.loads(candidate)
-    except json.JSONDecodeError as exc:
+        value = json.loads(
+            candidate,
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_non_finite,
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
         raise DistillerError("Gemini 提炼结果不是可解析的 JSON") from exc
     if not isinstance(value, dict):
         raise DistillerError("Gemini 提炼结果不是 JSON 对象")
 
-    def values(key: str) -> list[str]:
-        raw = value.get(key, [])
-        if isinstance(raw, str):
-            raw = [raw]
-        if not isinstance(raw, list):
-            return []
-        return [redact_text(str(item).strip()) for item in raw if str(item).strip()]
+    fields = {
+        "keep", "title", "summary", "knowledge", "patterns", "decisions",
+        "gotchas", "next_steps",
+    }
+    if value.keys() != fields:
+        missing = fields - value.keys()
+        extra = value.keys() - fields
+        details = []
+        if missing:
+            details.append("缺少字段")
+        if extra:
+            details.append("包含未声明字段")
+        raise DistillerError("Gemini 提炼结果字段不符合 schema（" + "、".join(details) + "）")
+    if type(value["keep"]) is not bool:
+        raise DistillerError("Gemini 提炼结果 keep 必须为布尔值")
+    if not isinstance(value["title"], str) or not isinstance(value["summary"], str):
+        raise DistillerError("Gemini 提炼结果 title 和 summary 必须为字符串")
 
-    keep_value = value.get("keep", False)
-    if isinstance(keep_value, str):
-        keep = keep_value.strip().lower() in {"true", "1", "yes", "keep"}
-    else:
-        keep = bool(keep_value)
-    title = redact_text(str(value.get("title") or "未命名可复用经验").strip())
-    summary = redact_text(str(value.get("summary") or "").strip())
+    arrays: dict[str, list[str]] = {}
+    for key in ("knowledge", "patterns", "decisions", "gotchas", "next_steps"):
+        raw = value[key]
+        if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+            raise DistillerError(f"Gemini 提炼结果 {key} 必须为字符串数组")
+        arrays[key] = [redact_text(item.strip()) for item in raw if item.strip()]
+
+    if value["keep"] and not value["summary"].strip() and not any(arrays.values()):
+        raise DistillerError("Gemini 提炼结果 keep=true 时必须包含可复用内容")
+
+    title = redact_text(value["title"].strip())
+    summary = redact_text(value["summary"].strip())
     return {
-        "keep": keep,
+        "keep": value["keep"],
         "title": title[:120] or "未命名可复用经验",
         "summary": summary,
-        "knowledge": values("knowledge"),
-        "patterns": values("patterns"),
-        "decisions": values("decisions"),
-        "gotchas": values("gotchas"),
-        "next_steps": values("next_steps"),
+        **arrays,
     }
 
 
@@ -1065,6 +1114,7 @@ def _output_specs(
         tags.append(f"project/{slugify(project, 'unknown')}")
     common_metadata: dict[str, Any] = {
         "model": FIXED_MODEL,
+        "evidence_level": "model-extracted",
         "project": project,
         "source_session": source_session,
         "source_input_hash": source_hash,
@@ -1182,8 +1232,47 @@ def _prepare_output(spec: dict[str, Any], source_hash: str) -> Path:
         metadata, body = read_note(created)
         if str(metadata.get("managed_by") or "") != MANAGED_BY:
             raise DistillerError(f"提炼输出缺少管理标记：{created.name}")
+        metadata["evidence_level"] = "model-extracted"
+        body = _model_extracted_evidence_body(body, str(metadata.get("source_session") or ""))
         _seal_managed_output_unlocked(created, metadata, body, status="pending")
     return created
+
+
+def _model_extracted_evidence_body(body: str, source_session: str) -> str:
+    """Replace empty template prompts with explicit evidence and review guidance."""
+    lines = body.splitlines()
+    marker = "## 维护提示"
+    try:
+        start = next(index for index, line in enumerate(lines) if line.strip() == marker)
+    except StopIteration:
+        lines.extend(["", marker])
+        start = len(lines) - 1
+
+    end = next(
+        (index for index in range(start + 1, len(lines)) if lines[index].startswith("## ")),
+        len(lines),
+    )
+    section: list[str] = []
+    for line in lines[start + 1:end]:
+        stripped = line.strip()
+        if re.fullmatch(r"-\s*(?:适用条件|验证方式)：\s*", stripped):
+            continue
+        if re.fullmatch(r"-\s*关联项目或会话：\s*", stripped):
+            if source_session:
+                section.append(f"- 关联项目或会话：{source_session}")
+            continue
+        if stripped.startswith("- 证据等级：") or stripped.startswith("- 复核要求："):
+            continue
+        section.append(line)
+    while section and not section[-1].strip():
+        section.pop()
+    section.extend(
+        [
+            "- 证据等级：模型提取，未经独立验证（model-extracted）。",
+            "- 复核要求：对照来源会话，并结合当前代码、文档或实际结果核实后再复用；模型判断或助手自述不构成执行证明。",
+        ]
+    )
+    return "\n".join([*lines[:start + 1], *section, *lines[end:]]).strip() + "\n"
 
 
 def distilled_notes(
@@ -1330,9 +1419,81 @@ def _complete_publication_unlocked(
         note_path,
         metadata,
         body,
-        {"distillation_publication": None, "status": "distilled" if new_paths else "distilled-no-value", "distillation_error": None, "distillation_failed_at": None},
+        {
+            "distillation_publication": None,
+            "status": "distilled" if new_paths else "distilled-no-value",
+            "distillation_error": None,
+            "distillation_failed_at": None,
+            "distillation_failure_kind": None,
+        },
         expected_input_hash=current_hash,
     )
+
+
+def _record_publication_recovery_failure(
+    job_key: str,
+    entry: dict[str, Any],
+    note_path: Path,
+    metadata: dict[str, Any],
+    body: str,
+    current_hash: str,
+    context_hash: str,
+    error: str,
+    settings: dict[str, Any],
+) -> int:
+    """Back off publication recovery, then quarantine it without touching outputs.
+
+    The caller holds queue_state_lock followed by note_lock(note_path).  The
+    pending publication pointer and any edited output are intentionally kept so
+    an explicit retry can finish after a user repairs the conflict.
+    """
+    try:
+        attempts = max(0, int(entry.get("recovery_attempts", 0))) + 1
+    except (TypeError, ValueError):
+        attempts = 1
+    message = ("发布恢复失败：" + redact_text(error))[:300]
+    entry = dict(entry)
+    entry["recovery_attempts"] = attempts
+    entry["failure_kind"] = "publication_recovery"
+    entry["last_error"] = message
+    entry.pop("processing", None)
+
+    if attempts < max_attempts(settings):
+        entry["not_before"] = time.time() + backoff_seconds(attempts)
+        _put_job(settings, "queue", job_key, entry)
+        return attempts
+
+    failed_at = iso_now()
+    entry["failed_at"] = failed_at
+    failed_key = _failed_key(note_path, current_hash, context_hash)
+    entry["metadata_update_failed"] = False
+    try:
+        _write_note_metadata_unlocked(
+            note_path,
+            metadata,
+            body,
+            {
+                "status": "distillation-failed",
+                "distiller_model": FIXED_MODEL,
+                "distillation_error": message,
+                "distillation_failed_at": failed_at,
+                "distillation_failed_input_hash": current_hash,
+                "distillation_failure_kind": "publication_recovery",
+            },
+            expected_input_hash=current_hash,
+        )
+    except Exception as exc:
+        metadata_error = f"{type(exc).__name__}: {redact_text(str(exc))}"[:220]
+        entry["metadata_update_failed"] = True
+        entry["metadata_update_error"] = metadata_error
+        entry["last_error"] = (message + "；源笔记失败状态写入失败：" + metadata_error)[:300]
+        log_line(
+            settings,
+            f"发布恢复达到上限，但无法写入源笔记失败状态 {note_path.name}：{metadata_error}；已保留 SQLite 失败账本",
+        )
+    _put_job(settings, "failed", failed_key, entry)
+    _delete_job(settings, "queue", job_key)
+    return attempts
 
 
 def _claim_snapshot(metadata: dict[str, Any], body: str) -> dict[str, Any]:
@@ -1387,10 +1548,18 @@ def process_entry(job_key: str, settings: dict[str, Any]) -> bool:
                 try:
                     _complete_publication_unlocked(note_path, metadata, body, current_hash, current_context)
                 except Exception as exc:
-                    entry["last_error"] = redact_text(str(exc))[:300]
-                    entry["not_before"] = time.time() + backoff_seconds(1)
-                    _put_job(settings, "queue", job_key, entry)
-                    log_line(settings, f"恢复提炼发布失败 {note_path.name}：{exc}")
+                    attempts = _record_publication_recovery_failure(
+                        job_key,
+                        entry,
+                        note_path,
+                        metadata,
+                        body,
+                        current_hash,
+                        current_context,
+                        str(exc),
+                        settings,
+                    )
+                    log_line(settings, f"恢复提炼发布失败 {note_path.name}：第 {attempts} 次：{redact_text(str(exc))}")
                     return False
                 _delete_job(settings, "queue", job_key)
                 return True
@@ -1868,7 +2037,7 @@ def retry_failed(*, dry_run: bool = False, error_contains: str = '', limit: int 
                     transition_started = True
                     if not existing:
                         entry = matching[0][1]
-                        _put_job(settings, "queue", target, {
+                        retry_entry = {
                             "note": str(note_path),
                             "queued_at": str(entry.get("queued_at") or iso_now()),
                             "not_before": time.time(),
@@ -1876,7 +2045,12 @@ def retry_failed(*, dry_run: bool = False, error_contains: str = '', limit: int 
                             "input_hash": identity[1],
                             "input_context_hash": identity[2],
                             "input_version": _entry_input_version(entry),
-                        })
+                        }
+                        if entry.get("failure_kind") == "publication_recovery":
+                            # An explicit retry starts a fresh bounded recovery window.
+                            retry_entry["recovery_attempts"] = 0
+                            retry_entry["failure_kind"] = "publication_recovery"
+                        _put_job(settings, "queue", target, retry_entry)
                         report["moved"] += 1
                     for key, _ in matching:
                         _delete_job(settings, "failed", key)

@@ -1,3 +1,5 @@
+> 历史计划（2026-09）：保留原文作为阶段记录。SQLite、模型版本和当前交付状态已演进；以 README.md、CHANGELOG.md 与 docs/ROADMAP.md 为准。
+
 # Agent Knowledge Base 优化与重构计划
 
 状态：阶段 A/B/C 已落地（2026-09-04）。阶段 D 仍延后。

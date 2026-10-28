@@ -35,7 +35,7 @@ class LifecycleHookTests(unittest.TestCase):
 
     def invoke(self, source, event, payload):
         return subprocess.run(
-            ["/usr/bin/python3", str(ROOT / "scripts/lifecycle_hook.py"), source, event],
+            [sys.executable, str(ROOT / "scripts/lifecycle_hook.py"), source, event],
             input=payload if isinstance(payload, str) else json.dumps(payload),
             text=True, capture_output=True, env=self.env, timeout=10,
         )

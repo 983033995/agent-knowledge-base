@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -18,7 +19,21 @@ import mcp_server
 class RetrievalTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
+        self.config = Path(self.temp.name) / "config.json"
+        self.config.write_text(json.dumps({
+            "vault_path": str(Path(self.temp.name) / "vault"),
+            "auto_discover_obsidian": False,
+            "session_directory": "00-Inbox/_agent-sessions",
+            "knowledge_directory": "10-技术笔记",
+            "patterns_directory": "10-技术笔记/patterns",
+            "decisions_directory": "10-技术笔记",
+            "managed_directories": ["00-Inbox/_agent-sessions", "10-技术笔记", "10-技术笔记/patterns"],
+            "search_all_markdown": False,
+            "search_directories": ["00-Inbox/_agent-sessions", "10-技术笔记"],
+            "search_exclude_directories": [],
+        }), encoding="utf-8")
         self.env = patch.dict(os.environ, {
+            "AKB_CONFIG": str(self.config),
             "AKB_VAULT": self.temp.name,
             "AKB_SEARCH_INDEX": str(Path(self.temp.name) / "index.json"),
             "AKB_DISTILLER_AUTOSTART": "0",
@@ -45,6 +60,12 @@ class RetrievalTests(unittest.TestCase):
     def test_nonmatching_query_does_not_return_directory_bonus(self) -> None:
         self.note("apple.md", "苹果种植与浇水")
         self.assertEqual(akb.search_notes("不存在的故障词XYZ"), [])
+
+    def test_ordered_cjk_fragments_recall_long_query_without_broad_overlap(self) -> None:
+        self.note("retry.md", "SQLite distiller 队列 worker 临时连接错误 exponential backoff retry")
+        self.assertEqual(len(akb.search_notes("连接错误临时")), 1)
+        self.assertEqual(akb.search_notes("连接火箭味觉"), [])
+        self.assertEqual(akb.search_notes("qzxvplmnr zzqmxvk xyzzqw"), [])
 
     def test_project_name_is_not_a_substring_search(self) -> None:
         self.note("a.md", project="alpha", body="数据库迁移；引用过 beta 项目")
@@ -77,6 +98,105 @@ class RetrievalTests(unittest.TestCase):
         self.note("fact.md", memory_type="project")
         self.assertEqual(len(akb.search_notes("数据库", memory_type="feedback")), 1)
 
+    def test_project_overview_role_can_receive_a_small_project_recall_boost(self) -> None:
+        overview = self.note(
+            "overview.md", body="数据库部署步骤",
+            context_role="project-overview", project="demo", project_path="/workspace/demo",
+        )
+        detailed = self.note(
+            "detail.md", body="数据库部署步骤和校验细节",
+            project="demo", project_path="/workspace/demo",
+        )
+        results = akb.search_notes("数据库部署", project="/workspace/demo")
+        self.assertEqual(results[0]["path"], overview)
+        self.assertIn(detailed, [row["path"] for row in results])
+
+    def test_validation_and_test_fixture_notes_require_explicit_type_opt_in(self) -> None:
+        validation = self.note("validation.md", type="validation")
+        fixture = self.note("fixture.md", type="test-fixture")
+        project_fixture = self.note("project-fixture.md", type="knowledge", memory_type="validation")
+        self.assertEqual(akb.search_notes("数据库"), [])
+        self.assertEqual(akb.search_notes("数据库", include_inactive=True), [])
+        self.assertEqual(
+            {row["path"] for row in akb.search_notes("数据库", memory_type="validation")},
+            {validation, project_fixture},
+        )
+        self.assertEqual(
+            {row["path"] for row in akb.search_notes("数据库", memory_type="test-fixture")},
+            {fixture},
+        )
+
+    def test_current_distilled_source_is_read_once_per_search_and_invalidated(self) -> None:
+        body = "source body for two generated notes"
+        body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        shared = {
+            "type": "knowledge", "source": "gemini-distiller", "project": "demo",
+            "project_path": "/workspace/demo", "project_key": "/workspace/demo", "scope": "project",
+        }
+        output_paths = [
+            self.note("generated-one.md", source_input_hash=body_hash, source_context_hash="ctx", source_session=f"{akb.session_directory()}/source.md", **shared),
+            self.note("generated-two.md", source_input_hash=body_hash, source_context_hash="ctx", source_session=f"{akb.session_directory()}/source.md", **shared),
+        ]
+        output_metas = [akb.read_note(path)[0] for path in output_paths]
+        source = akb.write_note(akb.session_directory(), "source.md", {
+            "title": "source", "type": "session", "project": "demo",
+            "project_path": "/workspace/demo", "project_key": "/workspace/demo", "scope": "project",
+            "distilled_input_hash": body_hash,
+            "distilled_paths": [path.relative_to(akb.vault_path()).as_posix() for path in output_paths],
+        }, body)
+        self.assertTrue(source.is_file())
+
+        snapshots = {}
+        with patch.object(akb, "read_note", wraps=akb.read_note) as read:
+            for path, metadata in zip(output_paths, output_metas):
+                self.assertTrue(akb._current_distilled_output(path, metadata, snapshots))
+            self.assertEqual(read.call_count, 1)
+
+        source_meta, _ = akb.read_note(source)
+        akb.write_note(akb.session_directory(), "source.md", source_meta, body + " updated", overwrite=True)
+        with patch.object(akb, "read_note", wraps=akb.read_note) as read:
+            self.assertFalse(akb._current_distilled_output(output_paths[0], output_metas[0], snapshots))
+            self.assertEqual(read.call_count, 1)
+
+    def test_explicit_config_is_selected_and_cache_tracks_config_path(self) -> None:
+        first = akb.load_config()
+        alternate = Path(self.temp.name) / "alternate.json"
+        alternate.write_text(json.dumps({
+            "vault_path": str(Path(self.temp.name) / "alternate-vault"),
+            "auto_discover_obsidian": False,
+            "knowledge_directory": "custom-knowledge",
+        }), encoding="utf-8")
+        with patch.dict(os.environ, {"AKB_CONFIG": str(alternate), "AKB_VAULT": ""}):
+            loaded = akb.load_config()
+        self.assertEqual(first["knowledge_directory"], "10-技术笔记")
+        self.assertEqual(loaded["knowledge_directory"], "custom-knowledge")
+        self.assertEqual(loaded["vault_path"], str((Path(self.temp.name) / "alternate-vault").resolve()))
+
+    def test_missing_local_config_falls_back_to_example(self) -> None:
+        missing = Path(self.temp.name) / "missing-config.json"
+        example = Path(self.temp.name) / "config.example.json"
+        example.write_text(json.dumps({
+            "vault_path": str(Path(self.temp.name) / "example-vault"),
+            "auto_discover_obsidian": False,
+            "knowledge_directory": "example-knowledge",
+        }), encoding="utf-8")
+        with patch.object(akb, "CONFIG_PATH", missing), patch.object(akb, "EXAMPLE_CONFIG_PATH", example), patch.dict(
+            os.environ, {"AKB_CONFIG": "", "AKB_VAULT": ""},
+        ):
+            loaded = akb.load_config()
+            example_vault = akb.ensure_vault()
+        self.assertEqual(loaded["knowledge_directory"], "example-knowledge")
+        self.assertEqual(loaded["vault_path"], str((Path(self.temp.name) / "example-vault").resolve()))
+        self.assertEqual(loaded["vault_path_source"], "default")
+        self.assertEqual(example_vault, (Path(self.temp.name) / "example-vault").resolve())
+
+        with patch.object(akb, "CONFIG_PATH", missing), patch.object(akb, "EXAMPLE_CONFIG_PATH", example), patch.dict(
+            os.environ, {"AKB_CONFIG": "", "AKB_VAULT": str(Path(self.temp.name) / "override-vault")},
+        ):
+            overridden = akb.load_config()
+        self.assertEqual(overridden["vault_path"], str((Path(self.temp.name) / "override-vault").resolve()))
+        self.assertEqual(overridden["vault_path_source"], "env")
+
     def test_context_never_exceeds_budget(self) -> None:
         self.note("long.md", body="数据库" * 1000)
         for budget in (30, 100, 300):
@@ -97,6 +217,20 @@ class RetrievalTests(unittest.TestCase):
         self.assertEqual(len(mcp_server.call_tool("memory_search", {
             "query": "数据库", "include_inactive": True, "memory_type": "feedback",
         })), 1)
+
+    def test_audit_commands_report_read_only_status_and_error_exit(self) -> None:
+        import knowledge_audit
+        import operations
+
+        parser = akb.build_parser()
+        failure = parser.parse_args(["failure-audit"])
+        with patch.object(operations, "failure_audit_report", return_value={"status": "error"}), patch("sys.stdout"):
+            self.assertEqual(failure.func(failure), 1)
+        knowledge = parser.parse_args(["knowledge-audit"])
+        with patch.object(knowledge_audit, "audit_report", return_value={"status": "partial"}), patch("sys.stdout"):
+            self.assertEqual(knowledge.func(knowledge), 0)
+        self.assertEqual(parser.parse_args(["search", "数据库", "--memory-type", "validation"]).memory_type, "validation")
+        self.assertEqual(parser.parse_args(["context", "--memory-type", "test-fixture"]).memory_type, "test-fixture")
 
     def test_mcp_list_preserves_existing_tools_and_adds_management(self) -> None:
         tools = {tool["name"] for tool in mcp_server.TOOLS}

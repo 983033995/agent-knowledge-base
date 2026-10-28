@@ -21,12 +21,9 @@ def recall(cwd: str, query: str = "") -> str:
         query=query, project=project_path, limit=3,
         directories=[akb.knowledge_directory(), akb.patterns_directory()],
     )
+    context = akb.build_context_from_results(rows, project=project_path, max_chars=2800)
     if not rows:
         return ""
-    context = akb.build_context(
-        query=query, project=project_path, limit=3, max_chars=2800,
-        directories=[akb.knowledge_directory(), akb.patterns_directory()],
-    )
     return "<akb-recalled-context>\n" + context + "\n</akb-recalled-context>"
 
 

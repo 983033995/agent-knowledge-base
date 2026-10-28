@@ -95,7 +95,7 @@ class DeepSeekBridgeTests(unittest.TestCase):
             self.assertEqual(mock.call_count, 2)
 
     def test_stdin_limit_and_sanitized_error(self):
-        result = subprocess.run(['/usr/bin/python3', str(ROOT / 'scripts/deepseek_lifecycle_bridge.py'), 'recall'],
+        result = subprocess.run([sys.executable, str(ROOT / 'scripts/deepseek_lifecycle_bridge.py'), 'recall'],
                                 input='private-not-json', text=True, capture_output=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn('private-not-json', result.stderr)

@@ -25,6 +25,7 @@ from typing import Any, Iterable
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "config.json"
+EXAMPLE_CONFIG_PATH = ROOT / "config.example.json"
 DEFAULT_VAULT = ROOT / "vault"
 DEFAULT_OBSIDIAN_REGISTRY = Path.home() / "Library/Application Support/obsidian/obsidian.json"
 NOTE_DIRS = (
@@ -128,15 +129,23 @@ def _active_obsidian_vault(config: dict[str, Any]) -> Path | None:
 def load_config() -> dict[str, Any]:
     global _CONFIG_CACHE, _CONFIG_CACHE_KEY, _CONFIG_CACHE_REGISTRY_PATH
 
+    configured_path = os.environ.get("AKB_CONFIG")
+    config_path = _path_value(configured_path) if configured_path else CONFIG_PATH
+    using_example_config = not configured_path and not config_path.exists() and EXAMPLE_CONFIG_PATH.exists()
+    if using_example_config:
+        config_path = EXAMPLE_CONFIG_PATH
+    if configured_path and not config_path.is_file():
+        raise RuntimeError(f"配置文件不存在：{config_path}")
     env_vault = os.environ.get("AKB_VAULT")
     env_registry = os.environ.get("AKB_OBSIDIAN_REGISTRY")
     registry_hint = _CONFIG_CACHE_REGISTRY_PATH or DEFAULT_OBSIDIAN_REGISTRY
     if env_registry:
         registry_hint = _path_value(env_registry)
     probe_key = (
+        str(config_path),
         env_vault,
         env_registry,
-        _mtime_ns(CONFIG_PATH),
+        _mtime_ns(config_path),
         str(registry_hint),
         _mtime_ns(registry_hint),
     )
@@ -144,11 +153,11 @@ def load_config() -> dict[str, Any]:
         return dict(_CONFIG_CACHE)
 
     config: dict[str, Any] = {}
-    if CONFIG_PATH.exists():
+    if config_path.exists():
         try:
-            config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            config = json.loads(config_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"无法读取配置 {CONFIG_PATH}: {exc}") from exc
+            raise RuntimeError(f"无法读取配置 {config_path}: {exc}") from exc
 
     configured = env_vault or config.get("vault_path")
     if env_vault:
@@ -162,14 +171,15 @@ def load_config() -> dict[str, Any]:
             source = "obsidian"
         else:
             vault = configured_path or DEFAULT_VAULT
-            source = "config" if configured_path is not None else "default"
+            source = "config" if configured_path is not None and not using_example_config else "default"
     config["vault_path"] = str(vault.resolve())
     config["vault_path_source"] = source
     _CONFIG_CACHE_REGISTRY_PATH = _obsidian_registry_path(config)
     _CONFIG_CACHE_KEY = (
+        str(config_path),
         env_vault,
         env_registry,
-        _mtime_ns(CONFIG_PATH),
+        _mtime_ns(config_path),
         str(_CONFIG_CACHE_REGISTRY_PATH),
         _mtime_ns(_CONFIG_CACHE_REGISTRY_PATH),
     )
@@ -438,6 +448,21 @@ def tokenize(value: str) -> list[str]:
     return [token for token in re.findall(r"[0-9a-zA-Z\u3400-\u9fff]+", value.lower()) if token]
 
 
+def _ordered_cjk_fragment_hits(query_token: str, haystack: str) -> int:
+    """Count ordered overlapping trigrams for a long Chinese query token."""
+    if len(query_token) < 5 or not all("\u3400" <= char <= "\u9fff" for char in query_token):
+        return 0
+    fragments = [query_token[index:index + 3] for index in range(len(query_token) - 2)]
+    cursor = 0
+    hits = 0
+    for fragment in fragments:
+        position = haystack.find(fragment, cursor)
+        if position >= 0:
+            hits += 1
+            cursor = position + 1
+    return hits
+
+
 SEARCH_INDEX_NAME = "search-index.json"
 SEARCH_EXCERPT_CHARS = 1200
 _SEARCH_INDEX_MEM: dict[str, Any] | None = None
@@ -586,20 +611,54 @@ def _note_in_directories(relative: str, directories: Iterable[str] | None) -> bo
     )
 
 
-def _current_distilled_output(path: Path, metadata: dict[str, Any]) -> bool:
+def _current_distilled_output(
+    path: Path,
+    metadata: dict[str, Any],
+    source_snapshots: dict[str, tuple[int, int, dict[str, Any], str, set[Path] | None]] | None = None,
+) -> bool:
     reference = str(metadata.get("source_session") or "").strip()
     if not reference:
         return True
     source = _safe_vault_path(Path(reference) if Path(reference).is_absolute() else vault_path() / reference)
     if source is None or not source.is_file():
         return False
-    source_metadata, source_body = read_note(source)
+    source_key = str(source)
+    try:
+        before = source.stat()
+    except OSError:
+        return False
+    cached = source_snapshots.get(source_key) if source_snapshots is not None else None
+    fingerprint = (before.st_mtime_ns, before.st_size)
+    if cached is not None and cached[:2] == fingerprint:
+        _, _, source_metadata, source_body, normalized = cached
+    else:
+        source_metadata, source_body = read_note(source)
+        try:
+            after = source.stat()
+        except OSError:
+            return False
+        if fingerprint != (after.st_mtime_ns, after.st_size):
+            if source_snapshots is not None:
+                source_snapshots[source_key] = (after.st_mtime_ns, after.st_size, {}, "", None)
+            return False
+        paths = source_metadata.get("distilled_paths")
+        normalized = None
+        if isinstance(paths, list):
+            normalized = {
+                resolved
+                for value in paths
+                if (resolved := _safe_vault_path(
+                    Path(value) if Path(str(value)).is_absolute() else vault_path() / str(value)
+                )) is not None
+            }
+        if source_snapshots is not None:
+            source_snapshots[source_key] = (
+                after.st_mtime_ns, after.st_size, source_metadata, source_body, normalized,
+            )
     if source_metadata.get("distillation_publication"):
         return False
-    paths = source_metadata.get("distilled_paths")
-    if not isinstance(paths, list):
+    if normalized is None:
         return False
-    normalized = {_safe_vault_path(Path(value) if Path(str(value)).is_absolute() else vault_path() / str(value)) for value in paths}
     if path.resolve() not in normalized:
         return False
     expected_hash = str(metadata.get("source_input_hash") or "")
@@ -637,6 +696,7 @@ def search_notes(
     seen: set[str] = set()
     results: list[dict[str, Any]] = []
     published_paths: set[str] | None = None
+    distilled_source_snapshots: dict[str, tuple[int, int, dict[str, Any], str, set[Path] | None]] = {}
     dirty = False
     for path in iter_notes():
         relative = str(path.relative_to(vault))
@@ -660,18 +720,20 @@ def search_notes(
             _, _, modified = _stat_note(path)
         if not include_inactive and str(metadata.get("status") or "active") in {"superseded", "revoked", "conflict", "ignored", "pending"}:
             continue
-        if not include_inactive and metadata.get("managed_by") == "akb-sync":
-            from memory_sync import published_notes
-
-            if published_paths is None:
-                published_paths = published_notes()
-            if relative not in published_paths:
-                continue
-        if not include_inactive and metadata.get("source") == "gemini-distiller" and not _current_distilled_output(path, metadata):
+        raw_types = {
+            str(metadata.get(key) or "").casefold()
+            for key in ("memory_type", "type")
+            if metadata.get(key)
+        }
+        resolved_type = str(metadata.get("memory_type") or metadata.get("type") or "").casefold()
+        validation_types = {"validation", "test-fixture"}
+        fixture_type = raw_types & validation_types
+        requested_type = memory_type.casefold()
+        if fixture_type and requested_type not in validation_types:
             continue
-        if not include_sessions and metadata.get("type") == "session-evidence":
+        if not include_sessions and str(metadata.get("type") or "") == "session-evidence":
             continue
-        if memory_type and str(metadata.get("memory_type") or metadata.get("type") or "") != memory_type:
+        if memory_type and requested_type != resolved_type and requested_type not in fixture_type:
             continue
         note_project = str(metadata.get("project") or "").strip()
         note_project_path = str(metadata.get("project_path") or metadata.get("project_key") or "").strip()
@@ -685,6 +747,15 @@ def search_notes(
                     display_name = note_project or (Path(note_project_path).name if note_project_path else "")
                     if not display_name or display_name.casefold() != project_lower:
                         continue
+        if not include_inactive and metadata.get("managed_by") == "akb-sync":
+            from memory_sync import published_notes
+
+            if published_paths is None:
+                published_paths = published_notes()
+            if relative not in published_paths:
+                continue
+        if not include_inactive and metadata.get("source") == "gemini-distiller" and not _current_distilled_output(path, metadata, distilled_source_snapshots):
+            continue
         title_lower = title.lower()
         score = 0
         for token in query_tokens:
@@ -692,6 +763,13 @@ def search_notes(
                 score += 12
             elif token in full:
                 score += 3
+            elif len(token) >= 4 and all("\u3400" <= char <= "\u9fff" for char in token):
+                title_hits = _ordered_cjk_fragment_hits(token, title_lower)
+                body_hits = _ordered_cjk_fragment_hits(token, full)
+                if title_hits >= 2:
+                    score += 8
+                elif body_hits >= 2:
+                    score += 4
         if query_tokens and not score:
             continue
         if not query_tokens:
@@ -706,6 +784,11 @@ def search_notes(
             score -= 1
         if project_lower and str(metadata.get("project") or "").lower().strip() == project_lower:
             score += 8
+        if project_lower and (
+            metadata.get("context_role") == "project-overview"
+            or metadata.get("project_overview") is True
+        ):
+            score += 4
         results.append(
             {
                 "path": path,
@@ -1131,17 +1214,13 @@ def health_report(sample_limit: int = 20) -> dict[str, Any]:
     }
 
 
-def build_context(
-    query: str = "",
+def build_context_from_results(
+    results: list[dict[str, Any]],
     project: str = "",
-    limit: int = 8,
     max_chars: int | None = None,
-    directories: Iterable[str] | None = None,
-    memory_type: str = "",
 ) -> str:
     config = load_config()
     max_chars = max_chars or int(config.get("max_context_chars", 12000))
-    results = search_notes(query=query, project=project, limit=limit, directories=directories, memory_type=memory_type)
     if not results:
         return "本地 Agent 知识库暂无匹配笔记。完成有长期价值的任务后，请用 memory_capture 或 akb capture 沉淀。"
 
@@ -1167,6 +1246,18 @@ def build_context(
         blocks.append(block)
         total += len(block)
     return "".join(blocks)[:max_chars]
+
+
+def build_context(
+    query: str = "",
+    project: str = "",
+    limit: int = 8,
+    max_chars: int | None = None,
+    directories: Iterable[str] | None = None,
+    memory_type: str = "",
+) -> str:
+    results = search_notes(query=query, project=project, limit=limit, directories=directories, memory_type=memory_type)
+    return build_context_from_results(results, project=project, max_chars=max_chars)
 
 
 def status_report() -> dict[str, Any]:
@@ -1524,7 +1615,7 @@ def create_capture_intake(
 
 def enqueue_distillation(note_path: Path) -> dict[str, Any]:
     """将已落盘的会话交给独立后台进程；不在当前 Agent 请求内调用模型。"""
-    script = ROOT / "scripts" / "distiller.py"
+    script = Path(__file__).with_name("distiller.py")
     try:
         completed = subprocess.run(
             [sys.executable, str(script), "enqueue", "--note", str(note_path)],
@@ -1757,7 +1848,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
 
 def _run_distiller(command: str, timeout: int = 4) -> int:
-    script = ROOT / "scripts" / "distiller.py"
+    script = Path(__file__).with_name("distiller.py")
     completed = subprocess.run(
         [sys.executable, str(script), command],
         check=False,
@@ -1788,6 +1879,22 @@ def cmd_runtime(_: argparse.Namespace) -> int:
 
     print(json.dumps(runtime_report(), ensure_ascii=False, indent=2))
     return 0
+
+
+def cmd_failure_audit(_: argparse.Namespace) -> int:
+    from operations import failure_audit_report
+
+    result = failure_audit_report()
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 1 if result.get("status") == "error" else 0
+
+
+def cmd_knowledge_audit(_: argparse.Namespace) -> int:
+    from knowledge_audit import audit_report
+
+    result = audit_report()
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 1 if result.get("status") == "error" else 0
 
 
 def cmd_sources(args: argparse.Namespace) -> int:
@@ -1863,7 +1970,7 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--project", default="")
     search.add_argument("--limit", type=int, default=8)
     search.add_argument("--excerpt", type=int, default=0)
-    search.add_argument("--memory-type", choices=("user", "feedback", "project", "reference", "experience", "session"), default="")
+    search.add_argument("--memory-type", choices=("user", "feedback", "project", "reference", "experience", "session", "validation", "test-fixture"), default="")
     search.add_argument("--include-inactive", action="store_true")
     search.add_argument("--include-sessions", action="store_true")
     search.set_defaults(func=cmd_search)
@@ -1873,8 +1980,14 @@ def build_parser() -> argparse.ArgumentParser:
     context.add_argument("--project", default="")
     context.add_argument("--limit", type=int, default=8)
     context.add_argument("--max-chars", type=int, default=12000)
-    context.add_argument("--memory-type", choices=("user", "feedback", "project", "reference", "experience"), default="")
+    context.add_argument("--memory-type", choices=("user", "feedback", "project", "reference", "experience", "validation", "test-fixture"), default="")
     context.set_defaults(func=cmd_context)
+
+    failure_audit = subparsers.add_parser("failure-audit", help="只读分类提炼失败记录与当前输入版本")
+    failure_audit.set_defaults(func=cmd_failure_audit)
+
+    knowledge_audit = subparsers.add_parser("knowledge-audit", help="只读汇总知识来源、版本、夹具和默认可见性")
+    knowledge_audit.set_defaults(func=cmd_knowledge_audit)
 
     capture = subparsers.add_parser("capture")
     capture.add_argument("--source", default="manual")

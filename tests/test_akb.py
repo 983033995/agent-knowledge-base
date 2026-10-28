@@ -101,7 +101,12 @@ class KnowledgeBaseTests(unittest.TestCase):
         old_registry = os.environ.get("AKB_OBSIDIAN_REGISTRY")
         os.environ["AKB_OBSIDIAN_REGISTRY"] = str(registry)
         try:
-            config = akb.load_config()
+            settings = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))
+            settings["auto_discover_obsidian"] = True
+            local_config = Path(self.temp_dir.name) / "config.json"
+            local_config.write_text(json.dumps(settings), encoding="utf-8")
+            with patch.dict(os.environ, {"AKB_CONFIG": str(local_config)}):
+                config = akb.load_config()
             self.assertEqual(config["vault_path"], str(active_vault.resolve()))
             self.assertEqual(config["vault_path_source"], "obsidian")
         finally:
