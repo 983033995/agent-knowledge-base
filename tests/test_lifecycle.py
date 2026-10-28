@@ -20,7 +20,21 @@ class LifecycleTests(unittest.TestCase):
         self.root = Path(self.temp.name).resolve()
         self.workspace = self.root / "project"
         self.workspace.mkdir()
+        self.config = self.root / "config.json"
+        self.config.write_text(json.dumps({
+            "vault_path": str(self.root / "vault"),
+            "auto_discover_obsidian": False,
+            "session_directory": "00-Inbox/_agent-sessions",
+            "knowledge_directory": "10-技术笔记",
+            "patterns_directory": "10-技术笔记/patterns",
+            "decisions_directory": "10-技术笔记",
+            "managed_directories": ["00-Inbox/_agent-sessions", "10-技术笔记", "10-技术笔记/patterns"],
+            "search_all_markdown": False,
+            "search_directories": ["00-Inbox/_agent-sessions", "10-技术笔记"],
+            "search_exclude_directories": [],
+        }), encoding="utf-8")
         self.env = patch.dict(os.environ, {
+            "AKB_CONFIG": str(self.config),
             "AKB_VAULT": str(self.root / "vault"), "AKB_STATE_DB": str(self.root / "state.sqlite3"),
             "AKB_SEARCH_INDEX": str(self.root / "index.json"), "AKB_SYNC_STATE_DIR": str(self.root / "sync"),
             "AKB_DISTILLER_STATE_DIR": str(self.root / "distill"), "AKB_DISTILLER_AUTOSTART": "0",
@@ -104,6 +118,19 @@ class LifecycleTests(unittest.TestCase):
 
     def test_nonabsolute_workspace_cannot_recall(self):
         self.assertEqual(lifecycle.recall("relative"), "")
+
+    def test_recall_reuses_one_search_for_context_rendering(self):
+        akb.write_note(
+            akb.knowledge_directory(), "overview.md",
+            {"title": "项目概览", "type": "knowledge", "project": "project",
+             "project_path": str(self.workspace), "context_role": "project-overview"},
+            "项目事实",
+        )
+        with patch.object(akb, "search_notes", wraps=akb.search_notes) as search:
+            context = lifecycle.recall(str(self.workspace))
+        self.assertEqual(search.call_count, 1)
+        self.assertIn("项目事实", context)
+        self.assertIn("项目概览", context)
 
     def test_workspace_conflict_is_not_relabelled(self):
         path = self.transcript()

@@ -8,7 +8,7 @@ const bridgePath = fileURLToPath(new URL('../scripts/deepseek_lifecycle_bridge.p
 
 export function runBridge(action, payload, timeout = 8000) {
   return new Promise((resolve, reject) => {
-    const child = spawn('/usr/bin/python3', [bridgePath, action], {
+    const child = spawn(process.env.AKB_PYTHON || 'python3', [bridgePath, action], {
       stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
     });
     let output = '';

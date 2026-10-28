@@ -25,7 +25,7 @@ from distiller import FIXED_MODEL
 
 SERVER_INFO = {
     "name": "agent-memory",
-    "version": "0.6.0",
+    "version": "0.7.0",
 }
 
 
@@ -42,7 +42,7 @@ TOOLS = [
             "properties": {
                 "query": {"type": "string", "description": "问题、主题或关键词"},
                 "project": {"type": "string", "description": "当前项目名或绝对路径，可选；路径可区分同名项目"},
-                "memory_type": {"type": "string", "description": "可选：user、feedback、project、reference、experience"},
+                "memory_type": {"type": "string", "description": "可选：user、feedback、project、reference、experience；validation/test-fixture 为显式验收读取"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 12, "default": 8},
                 "max_chars": {"type": "integer", "minimum": 1000, "maximum": 30000, "default": 12000},
             },
@@ -59,7 +59,7 @@ TOOLS = [
             "properties": {
                 "query": {"type": "string", "description": "搜索词"},
                 "project": {"type": "string", "description": "项目名或绝对路径，可选"},
-                "memory_type": {"type": "string", "description": "可选记忆类型"},
+                "memory_type": {"type": "string", "description": "可选记忆类型；validation/test-fixture 仅在显式指定时检索"},
                 "include_inactive": {"type": "boolean", "default": False, "description": "显式查看已取代或撤回版本"},
                 "include_sessions": {"type": "boolean", "default": False, "description": "显式检索导入的会话证据"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
@@ -177,6 +177,19 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
     },
 ]
+
+TOOLS.extend([
+    {
+        "name": "memory_failure_audit",
+        "description": "只读按当前/过期/旧格式/缺失/不可读输入分层提炼失败账本；返回聚合数量，不重试、不调用模型。",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "memory_knowledge_audit",
+        "description": "只读聚合审计长期知识的来源、版本可见性、证据等级、空模板和标题配对；不改正文或状态，不调用模型。",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+])
 
 for tool in TOOLS:
     read_only = tool["name"] not in {"memory_capture", "memory_sync"}
@@ -309,6 +322,14 @@ def call_tool(name: str, arguments: dict[str, Any]) -> Any:
                 "message": f"已写入主 Vault 的 {session_directory()}/；后台提炼暂未启动，可稍后重试",
                 "warning": redact_text(str(exc))[:300],
             }
+    if name == "memory_failure_audit":
+        from operations import failure_audit_report
+
+        return failure_audit_report()
+    if name == "memory_knowledge_audit":
+        from knowledge_audit import audit_report
+
+        return audit_report()
     if name == "memory_status":
         status = status_report()
         from operations import runtime_report

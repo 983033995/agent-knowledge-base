@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -27,6 +29,7 @@ class DistillerVersionTests(unittest.TestCase):
             AKB_VAULT=self.temp_dir.name,
             AKB_SEARCH_INDEX=str(Path(self.temp_dir.name) / "search-index.json"),
             AKB_DISTILLER_STATE_DIR=str(self.state_dir),
+            AKB_DISTILLER_CONFIG=str(Path(self.temp_dir.name) / "distiller.json"),
             AKB_DISTILLER_AUTOSTART="0",
             AKB_DISTILLER_ENABLED="1",
             AKB_DISTILLER_MAX_ATTEMPTS="1",
@@ -97,6 +100,66 @@ class DistillerVersionTests(unittest.TestCase):
             "gotchas": [],
             "next_steps": [],
         }
+
+    @staticmethod
+    def model_response(**changes: object) -> str:
+        value: dict[str, object] = {
+            "keep": True,
+            "title": "有效模型结果",
+            "summary": "源会话中的可复用经验",
+            "knowledge": ["只记录已由来源材料支持的结论"],
+            "patterns": [],
+            "decisions": [],
+            "gotchas": [],
+            "next_steps": [],
+        }
+        value.update(changes)
+        return json.dumps(value, ensure_ascii=False)
+
+    def test_distillation_parser_enforces_the_complete_model_contract(self) -> None:
+        parsed = distiller.parse_distillation_json(self.model_response())
+        self.assertEqual(distiller.parse_distillation_json("```json\n" + self.model_response() + "\n```"), parsed)
+        with self.assertRaises(distiller.DistillerError):
+            distiller.parse_distillation_json("前言\n```json\n" + self.model_response() + "\n```\n后记")
+        self.assertTrue(parsed["keep"])
+        self.assertEqual(parsed["knowledge"], ["只记录已由来源材料支持的结论"])
+
+        invalid = [
+            self.model_response().replace('"keep": true,', "", 1),
+            self.model_response(keep="false"),
+            self.model_response(title=7),
+            self.model_response(summary=None),
+            self.model_response(knowledge="不是数组"),
+            self.model_response(patterns=["有效", {"invalid": "shape"}]),
+            self.model_response(unexpected="field"),
+            self.model_response(knowledge=[float("nan")]),
+            self.model_response(summary="", knowledge=[], patterns=[], decisions=[], gotchas=[], next_steps=[]),
+            "前缀 " + self.model_response(),
+        ]
+        invalid.append(
+            self.model_response().replace('"keep": true,', '"keep": false, "keep": true,', 1)
+        )
+        for response in invalid:
+            with self.subTest(response=response[:60]), self.assertRaises(distiller.DistillerError):
+                distiller.parse_distillation_json(response)
+
+    def test_malformed_result_is_failed_instead_of_discarded_as_no_value(self) -> None:
+        note = self.intake("有效来源应保留")
+        distiller.enqueue(note)
+        queued = self.queue_file()
+        with patch.object(distiller, "request_model", side_effect=lambda *_: distiller.parse_distillation_json('{"title":"缺字段"}')):
+            distiller.process_entry(queued, distiller.load_settings())
+        metadata, body = akb.read_note(note)
+        self.assertEqual(metadata["status"], "distillation-failed")
+        self.assertIn("有效来源应保留", body)
+        self.assertEqual(self.read_job(queued, "queue"), None)
+        self.assertEqual(len(self.jobs("failed")), 1)
+        self.assertNotEqual(metadata["status"], "distilled-no-value")
+
+    def test_model_response_redacts_credentials_after_schema_validation(self) -> None:
+        response = self.model_response(knowledge=["api_key=sk-123456789012345678901234567890"])
+        parsed = distiller.parse_distillation_json(response)
+        self.assertNotIn("sk-123456789012345678901234567890", parsed["knowledge"][0])
 
     def make_ready(self, path: str) -> None:
         entry = self.read_job(path)
@@ -365,10 +428,173 @@ class DistillerVersionTests(unittest.TestCase):
         ):
             self.assertTrue(distiller.process_entry(queued, distiller.load_settings()))
 
-        output_metadata, _ = akb.read_note(self.distilled_paths(note)[0])
+        output_metadata, output_body = akb.read_note(self.distilled_paths(note)[0])
         self.assertEqual(output_metadata["project_path"], "/workspaces/demo")
         self.assertEqual(output_metadata["project_key"], "demo-key")
         self.assertEqual(output_metadata["scope"], "project")
+        self.assertEqual(output_metadata["evidence_level"], "model-extracted")
+        self.assertNotIn("- 适用条件：", output_body)
+        self.assertNotIn("- 验证方式：", output_body)
+        self.assertIn("未经独立验证（model-extracted）", output_body)
+        self.assertIn("助手自述不构成执行证明", output_body)
+        self.assertIn("00-Inbox/_agent-sessions/", output_body)
+
+    def test_publication_recovery_is_bounded_and_explicit_retry_can_recover(self) -> None:
+        os.environ["AKB_DISTILLER_MAX_ATTEMPTS"] = "2"
+        note = self.intake("需要发布的来源版本")
+        distiller.enqueue(note)
+        queued = self.queue_file()
+        metadata, body = akb.read_note(note)
+        source_hash = distiller.input_hash(body)
+        context_hash = distiller.input_context_hash(metadata)
+        output_path = distiller.distilled_notes(
+            note,
+            self.keep_result("发布恢复候选", "发布恢复标记"),
+            distiller.load_settings(),
+            input_metadata=metadata,
+            source_hash=source_hash,
+        )[0]
+        output_bytes = output_path.read_bytes()
+        publication = {
+            "source_input_hash": source_hash,
+            "source_context_hash": context_hash,
+            "new_paths": [str(output_path.relative_to(akb.vault_path()))],
+            "old_paths": [],
+        }
+        akb.update_note_metadata(
+            note,
+            {
+                "status": "distilled",
+                "distilled_input_hash": source_hash,
+                "distilled_input_context_hash": context_hash,
+                "distilled_paths": publication["new_paths"],
+                "distillation_publication": publication,
+            },
+        )
+        with akb.note_lock(output_path):
+            output_metadata, output_body = akb.read_note(output_path)
+            akb.atomic_write_text(
+                output_path,
+                akb.render_frontmatter(output_metadata) + output_body.rstrip() + "\n\n人工编辑，必须保留。\n",
+            )
+        edited_bytes = output_path.read_bytes()
+
+        self.assertFalse(distiller.process_entry(queued, distiller.load_settings()))
+        self.assertEqual(output_path.read_bytes(), edited_bytes)
+        pending_retry = self.read_job(queued, "queue")
+        self.assertIsNotNone(pending_retry)
+        assert pending_retry is not None
+        self.assertEqual(pending_retry["recovery_attempts"], 1)
+        self.assertGreater(pending_retry["not_before"], time.time())
+        self.make_ready(queued)
+        self.assertFalse(distiller.process_entry(queued, distiller.load_settings()))
+        self.assertEqual(self.read_job(queued, "queue"), None)
+        self.assertEqual(output_path.read_bytes(), edited_bytes)
+        intake_metadata, _ = akb.read_note(note)
+        self.assertEqual(intake_metadata["status"], "distillation-failed")
+        self.assertEqual(intake_metadata["distillation_failure_kind"], "publication_recovery")
+        self.assertEqual(intake_metadata["distillation_publication"], publication)
+        failed_key, failed_entry = self.jobs("failed")[0]
+        self.assertEqual(failed_key, distiller._failed_key(note, source_hash, context_hash))
+        self.assertEqual(failed_entry["failure_kind"], "publication_recovery")
+        self.assertEqual(failed_entry["recovery_attempts"], 2)
+
+        preview = distiller.retry_failed(dry_run=True, error_contains="发布恢复失败")
+        self.assertEqual(preview["selected_inputs"], 1)
+        self.assertEqual(preview["moved"], 0)
+        retried = distiller.retry_failed(error_contains="发布恢复失败")
+        self.assertEqual(retried["moved"], 1)
+        retried_entry = self.read_job(queued, "queue")
+        self.assertIsNotNone(retried_entry)
+        assert retried_entry is not None
+        self.assertEqual(retried_entry["recovery_attempts"], 0)
+
+        output_path.write_bytes(output_bytes)
+        self.make_ready(queued)
+        with patch.object(distiller, "request_model") as model:
+            self.assertTrue(distiller.process_entry(queued, distiller.load_settings()))
+        self.assertEqual(model.call_count, 0)
+        self.assertEqual(akb.read_note(output_path)[0]["status"], "active")
+        recovered_intake = akb.read_note(note)[0]
+        self.assertIsNone(recovered_intake.get("distillation_publication"))
+        self.assertNotIn("distillation_failure_kind", recovered_intake)
+
+    def test_recovery_terminal_ledger_survives_intake_metadata_write_failure(self) -> None:
+        os.environ["AKB_DISTILLER_MAX_ATTEMPTS"] = "1"
+        note = self.intake("受权限保护的来源版本")
+        distiller.enqueue(note)
+        queued = self.queue_file()
+        metadata, body = akb.read_note(note)
+        source_hash = distiller.input_hash(body)
+        context_hash = distiller.input_context_hash(metadata)
+        output_path = distiller.distilled_notes(
+            note,
+            self.keep_result("受保护发布候选", "终态发布恢复权限错误"),
+            distiller.load_settings(),
+            input_metadata=metadata,
+            source_hash=source_hash,
+        )[0]
+        publication = {
+            "source_input_hash": source_hash,
+            "source_context_hash": context_hash,
+            "new_paths": [str(output_path.relative_to(akb.vault_path()))],
+            "old_paths": [],
+        }
+        akb.update_note_metadata(
+            note,
+            {
+                "status": "distilled",
+                "distilled_input_hash": source_hash,
+                "distilled_input_context_hash": context_hash,
+                "distilled_paths": publication["new_paths"],
+                "distillation_publication": publication,
+            },
+        )
+        with akb.note_lock(output_path):
+            output_metadata, output_body = akb.read_note(output_path)
+            akb.atomic_write_text(
+                output_path,
+                akb.render_frontmatter(output_metadata) + output_body.rstrip() + "\n\n人工编辑，须保留。\n",
+            )
+        edited_output = output_path.read_bytes()
+
+        with patch.object(
+            distiller,
+            "_write_note_metadata_unlocked",
+            side_effect=PermissionError("intake metadata is read-only"),
+        ), patch.object(distiller, "request_model") as model:
+            self.assertFalse(distiller.process_entry(queued, distiller.load_settings()))
+            self.assertEqual(self.read_job(queued, "queue"), None)
+            failed_rows = self.jobs("failed")
+            self.assertEqual(len(failed_rows), 1)
+            failed_key, failed_entry = failed_rows[0]
+            self.assertEqual(failed_key, distiller._failed_key(note, source_hash, context_hash))
+            self.assertTrue(failed_entry["metadata_update_failed"])
+            self.assertIn("PermissionError", failed_entry["metadata_update_error"])
+            self.assertIn("源笔记失败状态写入失败", failed_entry["last_error"])
+
+            # Re-enqueue and empty-worker starts must not restart a terminal
+            # recovery window or rewrite the pending publication.
+            for _ in range(3):
+                result = distiller.enqueue(note)
+                self.assertFalse(result["queued"])
+                self.assertFalse(result["worker_started"])
+                self.assertEqual(result["reason"], "publication_recovery_failed")
+                self.assertEqual(self.jobs("queue"), [])
+                self.assertEqual(self.jobs("failed"), [(failed_key, failed_entry)])
+                self.assertEqual(output_path.read_bytes(), edited_output)
+                current, _ = akb.read_note(note)
+                self.assertEqual(current["status"], "distilled")
+                self.assertEqual(current["distillation_publication"], publication)
+
+            self.assertEqual(distiller.worker(), 0)
+            self.assertEqual(distiller.worker(), 0)
+            self.assertEqual(self.jobs("queue"), [])
+            self.assertEqual(self.jobs("failed"), [(failed_key, failed_entry)])
+            self.assertEqual(model.call_count, 0)
+
+        log = (self.state_dir / "distiller.log").read_text(encoding="utf-8")
+        self.assertIn("无法写入源笔记失败状态", log)
 
     def test_pending_output_is_not_recalled_before_publication(self) -> None:
         note = self.intake("发布中断前的输入")

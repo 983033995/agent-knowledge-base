@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-knowledge-base-local"
+version = "0.7.0"
+description = "Auditable local agent knowledge with Markdown storage and lifecycle capture"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE"]
+dependencies = []
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+]
+
+[project.scripts]
+akb = "akb_runtime.akb_launcher:main"
+akb-mcp = "akb_runtime.akb_launcher:mcp"
+akb-hook = "akb_runtime.akb_launcher:hook"
+
+[project.urls]
+Repository = "https://github.com/983033995/agent-knowledge-base"
+
+[tool.setuptools]
+packages = ["akb_runtime", "akb_runtime.scripts"]
+package-dir = {akb_runtime = "."}
+include-package-data = false
+
+[tool.setuptools.package-data]
+akb_runtime = ["config.example.json", "distiller.example.json", "integrations/*.mjs", "integrations/*.example", "integrations/codex-hooks.json"]

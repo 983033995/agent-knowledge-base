@@ -88,9 +88,9 @@ class UnifiedIntegrationTests(unittest.TestCase):
                 text=True, capture_output=True, env=env, timeout=10, check=True,
             )
             responses = [json.loads(line) for line in completed.stdout.splitlines()]
-            self.assertEqual(responses[0]["result"]["serverInfo"]["version"], "0.6.0")
+            self.assertEqual(responses[0]["result"]["serverInfo"]["version"], "0.7.0")
             names = {tool["name"] for tool in responses[1]["result"]["tools"]}
-            self.assertEqual(len(names), 10)
+            self.assertEqual(len(names), 12)
             self.assertIn("memory_sync", names)
             result = json.loads(responses[2]["result"]["content"][0]["text"])
             self.assertEqual(result["records"], 0)

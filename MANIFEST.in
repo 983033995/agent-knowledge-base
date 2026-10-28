@@ -1,0 +1,7 @@
+include README.md LICENSE config.example.json distiller.example.json
+include integrations/*.mjs integrations/*.example integrations/codex-hooks.json
+recursive-exclude vault *
+recursive-exclude .distiller *
+recursive-exclude .codegraph *
+recursive-exclude .workbuddy *
+exclude config.json distiller.json PROJECT-REVIEW-*
