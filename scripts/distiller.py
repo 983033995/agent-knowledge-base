@@ -64,6 +64,7 @@ TRANSIENT_ERROR_MARKERS = (
     "connection reset",
     "connection aborted",
     "connection closed",
+    "remote end closed connection without response",
     "reset by peer",
     "timed out",
     "timeout",
