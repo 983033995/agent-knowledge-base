@@ -10,6 +10,7 @@ import tempfile
 import threading
 import unittest
 from io import StringIO
+from http.client import RemoteDisconnected
 from pathlib import Path
 from unittest.mock import patch
 
@@ -551,6 +552,41 @@ class KnowledgeBaseTests(unittest.TestCase):
             self.assertEqual(metadata["status"], "distilling")
             self.assertEqual(self.queue_job()[0], queue_file)
             self.assertEqual(len(list((state_dir / "failed").glob("*.json"))), 0)
+        finally:
+            self.restore_env(old)
+
+    def test_remote_disconnect_retries_then_respects_attempt_limit(self) -> None:
+        old = self.set_distiller_env(
+            AKB_DISTILLER_AUTOSTART="0",
+            AKB_DISTILLER_ENABLED="1",
+            AKB_DISTILLER_MAX_ATTEMPTS="2",
+        )
+        try:
+            intake = akb.create_capture_intake(
+                source="qoder", title="断连重试夹具", project="synthetic",
+                raw_context="仅用于隔离测试，不调用真实模型。",
+            )
+            distiller.enqueue(intake)
+            job, _ = self.queue_job()
+            with patch.object(distiller, "auth_token", return_value="synthetic-only"), patch.object(
+                distiller, "urlopen",
+                side_effect=RemoteDisconnected("Remote end closed connection without response"),
+            ) as request:
+                self.assertFalse(distiller.process_entry(job, distiller.load_settings()))
+                _, pending = self.queue_job()
+                self.assertEqual(pending["attempts"], 1)
+                self.assertGreater(pending["not_before"], 0)
+                self.assertEqual(distiller._error_category(pending), "network")
+                self.assertEqual(distiller.collect_status()["failed"], 0)
+                self.assertTrue(distiller.process_entry(job, distiller.load_settings()))
+                self.assertEqual(request.call_count, 2)
+            status = distiller.collect_status()
+            self.assertEqual(status["queue"], 0)
+            self.assertEqual(status["failed"], 1)
+            self.assertEqual(status["failed_by_error"], {"network": 1})
+            metadata, _ = akb.read_note(intake)
+            self.assertEqual(metadata["status"], "distillation-failed")
+            self.assertFalse(distiller.is_transient_error(distiller.DistillerError("CLIProxyAPI 返回 HTTP 401")))
         finally:
             self.restore_env(old)
 
