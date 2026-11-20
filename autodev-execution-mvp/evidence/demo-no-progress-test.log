@@ -1,0 +1,9 @@
+..F                                                                      [100%]
+=================================== FAILURES ===================================
+______________________ test_complete_task_sets_done_true _______________________
+test_taskboard.py:24: in test_complete_task_sets_done_true
+    assert board.complete_task("a")["done"] is True
+E   assert False is True
+=========================== short test summary info ============================
+FAILED test_taskboard.py::test_complete_task_sets_done_true - assert False is True
+1 failed, 2 passed in 0.22s

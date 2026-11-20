@@ -1,0 +1,32 @@
+name: AutoDev MVP independent checks
+
+on:
+  push:
+    paths:
+      - 'autodev-execution-mvp/**'
+      - '.github/workflows/autodev-mvp.yml'
+  pull_request:
+    paths:
+      - 'autodev-execution-mvp/**'
+      - '.github/workflows/autodev-mvp.yml'
+  workflow_dispatch:
+
+jobs:
+  verify-autodev-mvp:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: autodev-execution-mvp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pytest
+        run: python -m pip install pytest
+      - name: Run real-Git integration tests
+        run: python -m pytest -q tests
+      - name: Smoke test demo CLI
+        run: |
+          python -m autodev seed /tmp/autodev-seed
+          python -m autodev run --repo /tmp/autodev-seed --output /tmp/autodev-report --provider fix

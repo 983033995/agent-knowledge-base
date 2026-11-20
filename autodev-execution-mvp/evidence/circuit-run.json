@@ -1,0 +1,28 @@
+{
+  "job_id": "7b8cd1138774",
+  "base_commit": "32d488a829512daafb7197e3ec2c57b036b2bf79",
+  "status": "CIRCUIT_OPEN",
+  "provider": "DemoNoProgressProvider",
+  "note": "Deterministic demo patch provider; NOT an LLM agent",
+  "tests_run_on_host": true,
+  "attempts": [
+    {
+      "attempt": 1,
+      "returncode": 1,
+      "fingerprint": "32a740a9f9e34c44",
+      "test_passed": false,
+      "log_file": "7b8cd1138774-attempt-1.log"
+    },
+    {
+      "attempt": 2,
+      "returncode": 1,
+      "fingerprint": "32a740a9f9e34c44",
+      "test_passed": false,
+      "log_file": "7b8cd1138774-attempt-2.log"
+    }
+  ],
+  "cleanup_success": true,
+  "token_usage": null,
+  "stop_reason": "no_progress_same_failure",
+  "report_file": "7b8cd1138774-report.json"
+}

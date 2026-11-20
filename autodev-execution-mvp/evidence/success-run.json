@@ -1,0 +1,22 @@
+{
+  "job_id": "2dc231c06d32",
+  "base_commit": "32d488a829512daafb7197e3ec2c57b036b2bf79",
+  "status": "SUCCEEDED",
+  "provider": "DemoFixProvider",
+  "note": "Deterministic demo patch provider; NOT an LLM agent",
+  "tests_run_on_host": true,
+  "attempts": [
+    {
+      "attempt": 1,
+      "returncode": 0,
+      "fingerprint": "passed",
+      "test_passed": true,
+      "log_file": "2dc231c06d32-attempt-1.log"
+    }
+  ],
+  "cleanup_success": true,
+  "token_usage": null,
+  "patch_file": "2dc231c06d32.patch",
+  "stop_reason": "tests_passed",
+  "report_file": "2dc231c06d32-report.json"
+}

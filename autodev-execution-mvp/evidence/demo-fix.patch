@@ -1,0 +1,11 @@
+diff --git a/taskboard.py b/taskboard.py
+index e4d170e..86f0aef 100644
+--- a/taskboard.py
++++ b/taskboard.py
+@@ -18,5 +18,5 @@ class TaskBoard:
+ 
+     def complete_task(self, task_id: str) -> dict[str, object]:
+         task = self.get_task(task_id)
+-        task["done"] = False  # BUG: should become True
++        task["done"] = True  # Task completion fix
+         return task
